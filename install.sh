@@ -237,7 +237,13 @@ cmd_wait() {
 
 cmd_token() {
   [ -f "$JOIN" ] || fail "Er is geen aanvraag."
-  local value; value=$(tr -d ' \r\n')
+  local value
+  if [ -t 0 ]; then   # typed in Terminal: one hidden line, Enter ends it
+    printf 'Plak hier je token of API-key en druk op Enter: ' >&2; IFS= read -rs value; printf '\n' >&2
+    value=$(printf '%s' "$value" | tr -d ' \r\n')
+  else
+    value=$(tr -d ' \r\n')
+  fi
   [ -n "$value" ] || fail "Geen token of key ontvangen."
   local kind=api_key; case $value in sk-ant-oat*) kind=oauth;; esac
   local body; body=$(py -c 'import json,sys; print(json.dumps({"kind": sys.argv[1], "value": sys.argv[2]}))' "$kind" "$value")
