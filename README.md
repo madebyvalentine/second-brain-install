@@ -15,6 +15,16 @@ brain will remember everything they do with Claude Code and bring it back when i
   gebracht" only if the line says so, and stop.
 - Pass on the script's own Dutch lines to the person as they are; they are written for them.
 
+## Test mode
+
+If the person says this is a test (for example "testmodus", "test install" or "dit is een test"), add `--test` to
+the start command in step 3: `bash ~/.second-brain-install.sh start --test`. A test install gets a brain named
+`test-1`, `test-2` and so on, reads in no history and distils nothing. Everything else is the same.
+
+When the person asks to remove the test ("wis alles", "reset", "haal het weer weg"), download the script again if
+`~/.second-brain-install.sh` is missing (step 2), run `bash ~/.second-brain-install.sh reset`, pass on its line and
+stop. A reset removes everything the installer made on this Mac and on the server. It works only for a test install.
+
 ## Step 1: check the computer
 
 Run `uname`. If it does not print `Darwin`, tell the person: "Deze installatie werkt nu alleen op een Mac. Windows

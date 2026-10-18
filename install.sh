@@ -6,6 +6,9 @@
 #   install.sh wait                                 wait for Valentine's decision (up to 9 minutes, then run it again)
 #   install.sh token                                the person's own API key on stdin, when wait asks for it
 #   install.sh status                               where the request stands
+#   install.sh start --test                         a test install: a test-N brain on the server, no history read in
+#                                                   and no distilling; for trying the installer again and again
+#   install.sh reset                                a test install removes everything it made, here and on the server
 #
 # It never prints a token or key. Everything it keeps lives in ~/.second-brain (mode 700) and the macOS Keychain.
 set -u
@@ -177,25 +180,27 @@ cmd_start() {
   [ "$(uname)" = "Darwin" ] || fail "Deze installatie is voor de Mac. Windows komt binnenkort."
   command -v claude >/dev/null 2>&1 || fail "Claude Code staat niet op deze computer."
   command -v curl >/dev/null 2>&1 || fail "curl ontbreekt."
-  if [ -f "$JOIN" ] && [ "${1:-}" != "--again" ]; then
+  if [ -f "$JOIN" ] && [ "${1:-}" != "--again" ] && [ "${1:-}" != "--test" ]; then
     say "Er loopt al een aanvraag. Gebruik: install.sh wait"; exit 0
   fi
   ensure_python
-  local name="" email="" plan conversations
+  local name="" email="" plan conversations test=false
   IFS=$'\t' read -r name email plan conversations <<EOF
 $(detect)
 EOF
   while [ $# -gt 0 ]; do case $1 in
-    --name) name=$2; shift 2;; --email) email=$2; shift 2;; --again) shift;; *) shift;; esac; done
+    --name) name=$2; shift 2;; --email) email=$2; shift 2;; --test) test=true; shift;; --again) shift;; *) shift;; esac; done
+  [ "$test" = false ] || [ ! -f "$JOIN" ] || { say "Er staat nog een testinstallatie. Eerst: install.sh reset"; exit 0; }
   [ -n "$name" ] || { say "NEED name"; exit 3; }
   [ -n "$email" ] || { say "NEED email"; exit 3; }
   local body
-  body=$(py -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "email": sys.argv[2], "plan": sys.argv[3], "conversations": int(sys.argv[4] or 0), "platform": "mac"}))' \
-    "$name" "$email" "$plan" "${conversations:-0}")
+  body=$(py -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "email": sys.argv[2], "plan": sys.argv[3], "conversations": int(sys.argv[4] or 0), "platform": "mac", "test": sys.argv[5] == "true"}))' \
+    "$name" "$email" "$plan" "${conversations:-0}" "$test")
   local out; out=$(admin_post /join "$body") || fail "De server van het brein is niet bereikbaar."
   split "$out"
   [ "$HTTP" = 201 ] || fail "De aanvraag werd niet aangenomen ($HTTP): $(printf '%s' "$BODY" | field error)"
-  printf '%s' "$BODY" > "$JOIN" && chmod 600 "$JOIN"
+  printf '%s' "$BODY" | py -c 'import json,sys; d=json.load(sys.stdin); d["test"]=sys.argv[1]=="true"; print(json.dumps(d))' "$test" > "$JOIN" && chmod 600 "$JOIN"
+  [ "$test" = false ] || say "Testinstallatie: er wordt geen geschiedenis ingelezen of gedistilleerd."
   say "Je aanvraag is verstuurd ($plan, $conversations gesprekken op deze computer). Valentine krijgt hem nu te zien."
   say "Volgende stap: install.sh wait"
 }
@@ -223,7 +228,7 @@ cmd_wait() {
           token=$(printf '%s' "$out" | field token); url=$(printf '%s' "$out" | field url)
           [ -n "$token" ] || fail "Het brein is klaar, maar de sleutel was al opgehaald. Vraag Valentine om een nieuwe."
           install_client "$url" "$token"
-          py -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(state="ready", url=sys.argv[2]); d.pop("secret", None); json.dump(d, open(sys.argv[1], "w"))' "$JOIN" "$url"
+          py -c 'import json,sys; d=json.load(open(sys.argv[1])); d.update(state="ready", url=sys.argv[2]); d.get("test") or d.pop("secret", None); json.dump(d, open(sys.argv[1], "w"))' "$JOIN" "$url"
           say "Je brein staat klaar op $url. Vanaf je volgende sessie onthoudt het wat je doet."
           exit 0;;
         "") say "Nog geen antwoord van de server...";;
@@ -259,10 +264,51 @@ cmd_status() {
   admin_get "/join/$(joined id)" "$(joined secret)" | field state
 }
 
+cmd_reset() {
+  [ -f "$JOIN" ] || { say "Er is niets om te wissen."; exit 0; }
+  [ "$(joined test 2>/dev/null)" = "True" ] || fail "Alleen een testinstallatie kan gewist worden."
+  local out; out=$(admin_post "/join/$(joined id)/reset" '{}' "$(joined secret)") || fail "De server is niet bereikbaar."
+  split "$out"
+  [ "$HTTP" = 200 ] || [ "$HTTP" = 404 ] || fail "De server kon de test niet wissen ($HTTP): $(printf '%s' "$BODY" | field error)"
+  # everything the installer put on this Mac
+  py - "$SETTINGS" "$HOME_DIR/hook.sh" <<'PY'
+import json, os, sys
+path, hook = sys.argv[1], sys.argv[2]
+try:
+    s = json.load(open(path))
+except Exception:
+    sys.exit(0)
+hooks = s.get("hooks", {})
+for event in list(hooks):
+    hooks[event] = [e for e in hooks[event] if hook not in json.dumps(e)]
+    if not hooks[event]:
+        del hooks[event]
+if not hooks:
+    s.pop("hooks", None)
+json.dump(s, open(path, "w"), indent=2)
+PY
+  rm -f "$SETTINGS.before-brain"
+  claude mcp remove -s user second-brain >/dev/null 2>&1
+  py - "$HOME/.claude/CLAUDE.md" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+if os.path.exists(path):
+    text = re.sub(r"\n*<!-- second-brain:start -->.*?<!-- second-brain:end -->\n?", "\n", open(path).read(), flags=re.S).strip()
+    if text:
+        open(path, "w").write(text + "\n")
+    else:
+        os.remove(path)
+PY
+  security delete-generic-password -s "$KEYCHAIN" $KEYCHAIN_FILE >/dev/null 2>&1
+  rm -rf "$HOME_DIR" "$HOME/.second-brain-install.sh"
+  say "Alles van de testinstallatie is weg, op deze Mac en op de server."
+}
+
 case "${1:-}" in
   start) shift; cmd_start "$@";;
   wait) cmd_wait;;
   token) cmd_token;;
   status) cmd_status;;
-  *) sed -n '2,12p' "$0"; exit 2;;
+  reset) cmd_reset;;
+  *) sed -n '2,15p' "$0"; exit 2;;
 esac

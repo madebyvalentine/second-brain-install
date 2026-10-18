@@ -121,6 +121,33 @@ check("and no instructions twice", (home / ".claude" / "CLAUDE.md").read_text().
 p = subprocess.run(["sh", str(home / ".second-brain" / "hook.sh"), "context"], input="{}", env=env, capture_output=True, text=True, timeout=60)
 check("the installed hook runs and exits 0", p.returncode == 0, p.stderr)
 
+# a test install, then a reset that leaves nothing behind
+(home / ".second-brain" / "join.json").unlink()
+resets = []
+admin.reset = lambda rid: resets.append(rid) or admin._path(rid).unlink() or {"reset": True}
+code, out = install("start", "--test")
+check("a test install says it reads in nothing", code == 0 and "Testinstallatie" in out, out)
+treq = [r for r in admin.all_requests() if r.get("test")]
+check("the server sees it as a test", len(treq) == 1, admin.all_requests())
+admin.decide(treq[0]["id"], "valentine")
+check("the test install is set up", install("wait")[0] == 0)
+code, out = install("reset")
+check("reset reports everything gone", code == 0 and "Alles van de testinstallatie is weg" in out, out)
+check("the server was asked to remove the test", resets == [treq[0]["id"]], resets)
+settings = json.loads((home / ".claude" / "settings.json").read_text())
+check("no brain hook is left, the person's own hook stays", "hook.sh" not in json.dumps(settings) and "say done" in json.dumps(settings), settings)
+check("the backup of their settings is gone", not (home / ".claude" / "settings.json.before-brain").exists())
+cfg = home / ".claude" / ".claude.json"
+left = json.loads(cfg.read_text()) if cfg.exists() else {}
+check("the brain's tools are gone", "second-brain" not in (left.get("mcpServers") or {}), left.get("mcpServers"))
+md = (home / ".claude" / "CLAUDE.md").read_text()
+check("the brain's instructions are gone, theirs stay", "second-brain" not in md and "Be brief." in md, md)
+check("~/.second-brain is gone", not (home / ".second-brain").exists())
+gone = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN, kc], capture_output=True)
+check("the Keychain item is gone", gone.returncode != 0)
+code, out = install("reset")
+check("a second reset finds nothing", "niets om te wissen" in out, out)
+
 subprocess.run(["security", "delete-keychain", kc], capture_output=True)
 door.shutdown(); brain.shutdown()
 print(f"\n{sum(results)}/{len(results)} passed")
